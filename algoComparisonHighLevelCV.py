@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, KFold, learning_curve, train_test_split
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_val_score, KFold, learning_curve, train_test_split
 from sklearn.base import BaseEstimator, clone
 from sklearn.pipeline import Pipeline
 import matplotlib.pyplot as plt
@@ -21,6 +21,14 @@ class AlgoComparison(BaseEstimator):
     search space and sklearn interface compatible models are supplied by the
     user. Cross validation and grid search settings can be user configurable.
 
+    NOTE: Difference between the algoComparisonHighLevelCV.py and the algoComparison.py:
+    Their difference is that the algoComparisonHighLevelCV.py used the more high level functions of sklearn for cross
+    validation and hyper parameter tuning (cross_val_score and GridSearchCV). The pros of this is that it allows you
+    to directly parallely process  the cross validaton in these two cases using the n_jobs input of the above two
+    functions. The con of this is that those two functions do not allow for fit_params as inputs and therefore extra
+    inputs in of the fit function like sample_weights are not possible. On the other hand algoComparison allows for
+    fit_params to go into the fit function by breaking the process into lower level steps, but parallel processing will
+    need to be done with other packages.
 
     ----------
     models : List of user supplied sklearn interface models
@@ -31,7 +39,8 @@ class AlgoComparison(BaseEstimator):
     """
 
     def __init__(self, models, model_params = None, model_param_search_grid = None, seed = 1,
-                 scoring = 'neg_mean_squared_error', cv_n_folds = 5, tuning_type = 'RandomSearch', path_to_save = None):
+                 scoring = 'neg_mean_squared_error', cv_n_folds = 5, tuning_type = 'RandomSearch', path_to_save = None,
+                 n_jobs = 1):
         self.models = models
         self.mode_params = model_params
         self.model_param_search_grid = model_param_search_grid
@@ -40,63 +49,41 @@ class AlgoComparison(BaseEstimator):
         self.cv_n_folds = cv_n_folds
         self.tuning_type = tuning_type
         self.path_to_save= path_to_save
+        self.n_jobs = n_jobs
 
     def _fit_cross_val(self, X, y, model, name, loss_weights = None, shuffle = False):
         start = time.time()
 
         kfold = KFold(n_splits =self.cv_n_folds, shuffle = shuffle)
-        kfold.get_n_splits(X)
-        scores = []
-        for train_index, test_index in kfold.split(X):
-            model_clone = clone(model)
-            X_train, X_test, y_train, y_test, = X[train_index], X[test_index], y[train_index], y[test_index]
-            if loss_weights is not None:
-                weights_test = loss_weights[test_index]
-                if type(model) == Pipeline:
-                    fit_params = {str(model.steps[-1][0]) + '__sample_weight': loss_weights[train_index]}
-                else:
-                    fit_params = {'sample_weight': loss_weights[train_index]}
-            else:
-                weights_test = None
-                fit_params = {}
-
-            model_clone.fit(X_train, y_train, **fit_params)
-            y_pred = model_clone.predict(X_test)
-            score = self.scoring(y_test, y_pred, sample_weights = weights_test)
-            scores.append(score)
+        if type(model) == Pipeline:
+            fit_params = {str(model.steps[-1][0]) + '__sample_weight': loss_weights}
+        else:
+            fit_params = {'sample_weight': loss_weights}
+        cv_results = cross_val_score(model,X,y,cv = kfold, scoring = self.scoring, n_jobs = self.n_jobs, fit_params = fit_params)
         end = time.time()
+
+        if self.scoring[0:3] == 'neg':
+            cv_results = cv_results * -1
+
         print(str(self.cv_n_folds) + '-fold cross validation time for ' + str(name) + ' is ' +
               "{:.2f}".format((end-start)/60, 2) + ' mins for a total of ' + str(len(y)) + ' data points.')
-        return scores
+        return cv_results
 
     def _fit_tuning(self, X, y, model, name, n_iter, loss_weights = None):
-        keys, values = zip(*self.model_param_search_grid.items())
-        all_param_combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
-        tuning_results = []
+        if type(model) == Pipeline:
+            fit_params = {str(model.steps[-1][0]) + '__sample_weight': loss_weights}
+        else:
+            fit_params = {'sample_weight': loss_weights}
         if self.tuning_type == 'GridSearch':
-            param_combinations = all_param_combinations
+            search = GridSearchCV(model, self.model_param_search_grid[name], scoring=self.scoring, cv = self.cv_n_folds,
+                                  n_jobs = self.n_jobs, verbose=1, return_train_score=True)
         elif self.tuning_type == 'RandomSearch':
-            param_combinations = random.sample(all_param_combinations, min(n_iter, len(all_param_combinations))) #randomly sample without replacement from list of dictionaries, n_iter_times
+            search = RandomizedSearchCV(model, self.model_param_search_grid[name], n_iter = n_iter, scoring=self.scoring,
+                                  cv = self.cv_n_folds, n_jobs = self.n_jobs, verbose=1, return_train_score=True)
 
-        count = 0
-        #Tuing starts here - cross validation for different parameter combinations
-        for param_combinations in param_combinations:
-            model.set_params(**param_combinations)
-            start =time.time()
-            cv_result = self._fit_cross_val(X, y, model, name, loss_weights)
-            end = time.time()
-            dict_keys = ['val_' + str(i) for i in range(len(cv_result))]
-            cv_result_dict = dict(zip(dict_keys, cv_result))
-            tuning_result_dict = dict(cv_result_dict, **param_combinations, **{'val_mean': np.mea(cv_result),
-                                                                               'val_std': np.std( cv_result),
-                                                                               'cv_time': ((end - start)/60)})
-            tuning_results.append(tuning_result_dict)
-            count +=1
-            print('tuning iteration ' + str(count))
-        tuning_result_dict = {k: [d[k] for d in tuning_results] for k in tuning_results[0]}
-        tuning_results_pd = pd.DataFrame(tuning_result_dict)
-        print('best parameters and their scores for model ' + str(name) + ' are \n %s' %(tuning_results_pd.iloc[tuning_results_pd['val_mean'].idxmin()]))
-        return tuning_results_pd
+        search_fit = search.fit(X,y, **fit_params)
+        print('best estimator is %s' %(search_fit.best_estimator_))
+        return search
 
     def _chk_dict_key(self, dic, key):
         #checks if keys belong in the dict. if not creates an empty dict
