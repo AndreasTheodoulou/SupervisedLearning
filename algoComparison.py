@@ -14,6 +14,7 @@ import gc
 
 
 class AlgoComparison(BaseEstimator):
+
     """This is an sklearn type class for sequentially testing multiple sklearn
     interface models on data with hyper-parameter tuning for the individual
     models. Hyper-parameter tuning is done using grid search.
