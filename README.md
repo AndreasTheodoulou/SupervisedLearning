@@ -1,2 +1,2 @@
 # SupervisedLearning
-Flexible Supervised Leanrning framework for modelling
+Various tools that aid modelling within a Supervised Leanrning framework
